@@ -46,7 +46,7 @@ const DEMO_PREFIX = "DEMO-"; // commerces de démonstration : jamais dans le reg
    celle qu'il avait la dernière fois, il est automatiquement déconnecté et
    renvoyé à l'écran de connexion — il voit alors la nouvelle version.
 ------------------------------------------------------------------- */
-const APP_VERSION = "3.3";
+const APP_VERSION = "3.4";
 
 const fmt = (n) => new Intl.NumberFormat("fr-FR", { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(n || 0);
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -3936,20 +3936,59 @@ function AppInner() {
   useEffect(() => {
     let cancelled = false;
 
-    const publish = async () => {
-      try { await storage.set("latestAppVersion", JSON.stringify(APP_VERSION), true); } catch (e) {}
+    // Clé propre à Wuri (MTE Registre partage la même base mais a sa propre clé,
+    // sinon les deux applications se renvoient mutuellement des rechargements).
+    const VERSION_KEY = "latestAppVersion:wuri";
+    // Compare deux numéros de version "3.4" vs "3.10" : > 0 si a est plus récent que b.
+    const cmpVersion = (a, b) => {
+      const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
+      const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const d = (pa[i] || 0) - (pb[i] || 0);
+        if (d !== 0) return d;
+      }
+      return 0;
     };
-    publish();
 
-    const checkForUpdate = async () => {
+    // Ne publie que si cette version est plus récente que celle déjà annoncée :
+    // un vieil appareil resté sur une ancienne version ne peut plus "faire reculer" les autres.
+    const publish = async () => {
       try {
-        const res = await storage.get("latestAppVersion", true);
-        const latest = res ? JSON.parse(res.value) : null;
-        if (!cancelled && latest && latest !== APP_VERSION) {
-          window.location.reload();
+        const res = await storage.get(VERSION_KEY, true);
+        const current = res ? JSON.parse(res.value) : null;
+        if (!current || cmpVersion(APP_VERSION, current) > 0) {
+          await storage.set(VERSION_KEY, JSON.stringify(APP_VERSION), true);
         }
       } catch (e) {}
     };
+    publish();
+
+    // Vide le cache de l'application (service worker) avant de recharger, sinon
+    // le rechargement ressert l'ancienne version depuis le cache du téléphone.
+    const hardReload = async () => {
+      try {
+        if ("serviceWorker" in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(regs.map((r) => r.unregister()));
+        }
+        if (window.caches) {
+          const keys = await caches.keys();
+          await Promise.all(keys.map((k) => caches.delete(k)));
+        }
+      } catch (e) {}
+      window.location.reload();
+    };
+
+    const checkForUpdate = async () => {
+      try {
+        const res = await storage.get(VERSION_KEY, true);
+        const latest = res ? JSON.parse(res.value) : null;
+        if (!cancelled && latest && cmpVersion(latest, APP_VERSION) > 0) {
+          hardReload();
+        }
+      } catch (e) {}
+    };
+    checkForUpdate();
 
     const interval = setInterval(checkForUpdate, 45000);
     return () => { cancelled = true; clearInterval(interval); };
